@@ -1,0 +1,270 @@
+TO SPLIT DATA INTO TRAIN TEST AND ANSWERS STRATIFIED SPLIT:
+
+df = pd.read_csv('housing.csv')
+
+#%%
+
+df['median_income_cat'] = pd.cut(df['median_income'], bins=[0., 2., 4., 6., 8., np.inf],
+                    labels=[1, 2, 3, 4, 5])
+
+#%%
+sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+for train_index, test_index in sss.split(df, df['median_income_cat']):
+    print("TRAIN:", train_index, "TEST:", test_index)
+    train_df = df.loc[train_index]
+    test_df = df.loc[test_index]
+
+train_df = train_df.drop('median_income_cat', 1)
+test_df = test_df.drop('median_income_cat', 1)
+
+print(train_df.shape)
+print(test_df.shape)
+
+#%%
+train_df.to_csv('train_df.csv', index=False)
+
+test_df.drop('median_house_value', 1).to_csv('test_df.csv', index=False)
+
+#%%
+
+test_df.loc[ :, ['median_house_value']].to_csv('test_answers.csv')
+
+
+
+
+Pipeline steps:
+
+1 Fill null total_bedrooms:
+
+    op_for_nans = df[['total_bedrooms', 'ocean_proximity']].loc[
+        df['total_bedrooms'].isna()]['ocean_proximity'].value_counts()
+    op_for_nans = op_for_nans.index.to_list()
+    op_for_nans
+
+    #%%
+
+    for val in op_for_nans:
+        median = df[df['ocean_proximity'] == val]['total_bedrooms'].median()
+        df.loc[df['ocean_proximity']==val,'total_bedrooms'] =  \
+            df[df['ocean_proximity']==val]['total_bedrooms'].fillna(median)
+
+2 emove outlier values 500000.1:
+
+    df = df.loc[df['median_house_value'] < 500001, :]
+
+3 Remove outliers above iqr*1.5:
+
+    def outlier_treatment(datacolumn):
+        sorted(datacolumn)
+        q1, q3 = np.percentile(datacolumn , [25,75])
+        iqr = q3 - q1
+        lower_range = q1 - (1.5 * iqr)
+        upper_range = q3 + (1.5 * iqr)
+        return lower_range,upper_range
+
+    #%%
+
+    for col in outlier_cols:
+        lower_range, upper_range = outlier_treatment(df['total_rooms'])
+        outliers = df.loc[(df['total_rooms'] > upper_range) | (df['total_rooms'] < lower_range)]
+        outliers_indexes = outliers.index
+        df = df.drop(outliers_indexes)
+
+4 Log transform outlier_cols escept total_rooms
+
+    outlier_cols.remove('total_rooms')
+    for col in outlier_cols:
+        df[col] = np.log(df[col])
+
+5 add foeatures made from others
+
+    df["rooms_per_household"]=df["total_rooms"]/df["households"]
+    df["bedrooms_per_room"]=df["total_bedrooms"]/df["total_rooms"]
+    df["population_per_household"]=df["population"]/df["households"]
+
+6 Adding big_city_dist and name as Features
+    cities_coords = pd.read_csv('cal_cities_lat_long.csv')
+    cities_coords
+
+    #%%
+
+    cities_pop = pd.read_excel('1990 to 2000 Population Changes in California Cities and Counties (XLS).xlsx')
+    cities_pop.drop(range(0, 12), axis=0, inplace=True)
+    cities_pop.drop(['Unnamed: 2', 'Unnamed: 3', 'Unnamed: 4'], 1, inplace=True)
+
+    #%%
+
+    cities_pop.columns = ['City', 'Population']
+
+    #%%
+
+    cities_pop.isna().sum()
+
+    #%%
+
+    cities_pop.dropna(inplace=True)
+
+
+
+    #%%
+
+    counties_indexes = cities_pop[cities_pop['City'].str.contains("County")].index
+    cities_pop.drop(counties_indexes, inplace=True)
+
+    #%%
+
+    cities_pop.sort_values('City', inplace=True)
+    cities_coords.columns =['City', 'Latitude', 'Longitude']
+    cities_coords.sort_values('City', inplace=True)
+
+    #%%
+
+    cities_pop[~cities_pop['City'].str.contains("city")]
+
+
+    #%%
+
+    cities_coords[cities_coords['City'].str.contains("city")]
+
+    #%%
+
+    """
+    remove from:
+    DONE cities_pop every lowercase city, town word in each row (use replace)
+     cities_coords every city not in cities_pop remove
+    """
+
+    #%%
+
+    cities_pop['City'] = cities_pop['City'].transform(lambda x: x.str.replace(' city', ''))
+    cities_pop['City'] = cities_pop['City'].transform(lambda x: x.str.replace(' town', ''))
+
+    #%%
+
+    print(cities_pop[cities_pop['City'].str.contains("town")].sum())
+    print(cities_pop[cities_pop['City'].str.contains("city")].sum())
+
+    #%%
+
+    cities_pop = cities_pop.loc[cities_pop['Population'] > 400000]
+
+    cities_coords = cities_coords.loc[cities_coords['City'].isin(cities_pop['City'])]
+
+    #%%
+
+    cities_pop
+
+    #%%
+
+    cities_coords
+
+    #%%
+
+    from geopy import distance
+
+    #%%
+
+    df['nearest_big_city'] = np.nan
+    df['nearest_big_city_dist'] = np.nan
+
+
+    for house_index, house_row in df.iterrows():
+        house_lat_long = (house_row['latitude'], house_row['longitude'])
+
+        closest_city = None
+        for city_index, city_row in cities_coords.iterrows():
+            city_lat_long = (round(city_row['Latitude'], 6), round(city_row['Longitude'], 6))
+            dist = distance.distance(house_lat_long, city_lat_long).kilometers
+
+            if closest_city is None:
+                closest_city = (city_row['City'], dist)
+            elif dist < closest_city[1]:
+                closest_city = (city_row['City'], dist)
+
+        df.loc[house_index, 'nearest_big_city'] = closest_city[0]
+        df.loc[house_index, 'nearest_big_city_dist'] = closest_city[1]
+
+7 Removing highly correalted features
+
+    df = df.drop(['population', 'total_bedrooms', 'total_rooms', 'households'], 1)
+
+8 Onehot encoding ocean proximity and nearest city
+    df_cat = ['ocean_proximity', 'nearest_big_city']
+
+    #%%
+
+    from sklearn.preprocessing import OneHotEncoder
+    from sklearn.decomposition import PCA
+    df.columns
+
+
+    #%%
+
+    X = df.drop('median_house_value', 1)
+
+    ohe = OneHotEncoder()
+
+    enc_df = pd.DataFrame(ohe.fit_transform(
+        X[df_cat]).toarray())
+
+    #%%
+
+    enc_df
+
+
+    #%%
+
+    def c_variance_ohe(X):
+        total=0
+        clist=[]
+        for i in np.arange(0,enc_df.shape[1]):
+            p=PCA(n_components=i+1)
+            p.fit(X)
+            total=total+p.explained_variance_ratio_[i]
+            clist.append(total)
+
+        return clist
+
+    x_train_variance=list(map(lambda x:x*100,c_variance_ohe(enc_df)))
+
+    #%%
+
+    plt.figure(figsize=(15,10))
+    plt.plot(np.arange(1,enc_df.shape[1]+1),x_train_variance,marker='o',markerfacecolor='red',lw=6)
+    plt.xlabel('number of components')
+    plt.ylabel('comulative variance %')
+    plt.title('comulative variance ratio of p.c.a components')
+
+    #%%
+
+    # TEST
+    pca = PCA(n_components=7)
+    enc_df = pca.fit_transform(enc_df)
+
+    #%%
+
+    enc_df = pd.DataFrame(enc_df)
+
+    #%%
+
+    enc_df
+
+    #%%
+
+    enc_df.reset_index(drop=True, inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+
+    #%%
+
+    df = pd.concat([df, enc_df], axis=1)
+
+
+
+    #%%
+
+    df = df.drop(df_cat, axis=1)
+
+9 Apply Standard scaler:
+
+
